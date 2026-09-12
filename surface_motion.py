@@ -4,12 +4,12 @@ No object IDs, shape class, learned features or centroid association. Each
 current return keeps its own velocity. Matching uses finite line segments,
 not infinite tangent lines. Occluded/unmatched estimates remain unsupported.
 """
+import numpy as np
 from dataclasses import dataclass
 
-import numpy as np
-from scipy.spatial import cKDTree
+from motion_geometry import GeometryConfig, SurfaceDistance, extract_finite_surfaces
 
-from geometric_motion import GeometryConfig, extract_surfaces
+extract_surfaces = extract_finite_surfaces
 
 
 @dataclass
@@ -22,33 +22,6 @@ class SurfaceConfig:
     noise_tolerance: float = .025
     max_residual: float = .06
     min_improvement: float = .015
-
-
-class SurfaceDistance:
-    def __init__(self, surfaces):
-        starts, ends = [], []
-        for surface in surfaces:
-            p = surface['points']
-            if len(p) >= 2:
-                starts.extend(p[:-1])
-                ends.extend(p[1:])
-        self.starts = np.asarray(starts).reshape(-1, 2)
-        self.ends = np.asarray(ends).reshape(-1, 2)
-        self.tree = cKDTree((self.starts + self.ends)/2) if len(starts) else None
-
-    def distance(self, points):
-        if self.tree is None:
-            return np.full(points.shape[:-1], np.inf)
-        shape = points.shape[:-1]
-        points = points.reshape(-1, 2)
-        # Nearby midpoints propose finite surfaces; no cross-gap interpolation.
-        _, indices = self.tree.query(points, k=min(8, len(self.starts)))
-        indices = np.asarray(indices).reshape(len(points), -1)
-        a, b = self.starts[indices], self.ends[indices]
-        ab = b-a
-        t = ((points[:, None]-a)*ab).sum(-1) / np.maximum((ab*ab).sum(-1), 1e-12)
-        projection = a + np.clip(t, 0., 1.)[..., None]*ab
-        return np.linalg.norm(points[:, None]-projection, axis=-1).min(-1).reshape(shape)
 
 
 def estimate_surface_motion(lidar, odom, timestamps, cfg=None):

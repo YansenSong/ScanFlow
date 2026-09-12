@@ -4,49 +4,13 @@ Preserves XY returns and their beam support. Velocity is in the current robot
 frame. Match support is diagnostic evidence, NOT a calibrated probability.
 Centroid drift under occlusion is an intentional limitation of this baseline.
 """
-from dataclasses import dataclass
-
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from motion_geometry import GeometryConfig, extract_finite_surfaces
 
-@dataclass
-class GeometryConfig:
-    range_min: float = 0.05
-    range_max: float = 10.0
-    angle_min: float = -np.pi
-    max_speed: float = 1.5
-    gap_base: float = 0.10
-    gap_scale: float = 2.0
-    minimum_points: int = 2
-
-
-def extract_surfaces(scan, pose, current_pose, cfg):
-    """Full-circle adaptive gap segmentation, then exact SE(2) alignment."""
-    h = len(scan)
-    angles = cfg.angle_min + np.arange(h) * 2 * np.pi / h
-    valid = np.isfinite(scan) & (scan >= cfg.range_min) & (scan <= cfg.range_max)
-    r = np.where(valid, scan, 0.)
-    xy = r[:, None] * np.stack([np.cos(angles), np.sin(angles)], -1)
-    groups = []
-    for i in range(h):
-        if not valid[i]:
-            continue
-        threshold = cfg.gap_base + cfg.gap_scale * min(r[i], r[i-1]) * 2 * np.pi / h
-        if not groups or i != groups[-1][-1] + 1 or np.linalg.norm(xy[i] - xy[i-1]) > threshold:
-            groups.append([])
-        groups[-1].append(i)
-    if len(groups) > 1 and valid[0] and valid[-1]:
-        threshold = cfg.gap_base + cfg.gap_scale * min(r[0], r[-1]) * 2 * np.pi / h
-        if np.linalg.norm(xy[0] - xy[-1]) <= threshold:
-            groups[0] = groups[-1] + groups[0]
-            groups.pop()
-    def rotation(yaw):
-        c, s = np.cos(yaw), np.sin(yaw)
-        return np.array([[c, -s], [s, c]])
-    xy = (xy @ rotation(pose[2]).T + pose[:2] - current_pose[:2]) @ rotation(current_pose[2])
-    return [dict(beams=np.array(g), points=xy[g], anchor=xy[g].mean(0),
-                 extent=float(np.linalg.norm(np.ptp(xy[g], axis=0)))) for g in groups]
+# Preserve the old public names for baseline scripts.
+extract_surfaces = extract_finite_surfaces
 
 
 def estimate_motion(lidar, odom, timestamps, cfg=None):

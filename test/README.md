@@ -120,3 +120,54 @@ Caches independent train/validation/test scenes in `artifacts/candidate_scorer/`
 `--prepare` regenerates those files. GPU training selects by validation loss only.
 The first model improves classification but worsens velocity accuracy; see
 `docs/candidate_scorer_2026-09-12.md`. It is not connected to the production planner.
+
+## ScanFlow v2: candidate selection + continuous geometry refinement
+
+The v2 prototype keeps current-beam XY support, scores metric coarse
+velocities, and performs local finite-surface refinement. It is independent of
+the legacy `model.py` and is not connected to the planner.
+
+Contract tests:
+
+```bash
+conda run --no-capture-output -n scanflow python -m unittest \
+  test.test_motion_cost_contract \
+  test.test_motion_geometry_contract \
+  test.test_motion_estimator_v2_contract \
+  test.test_motion_v2_hard_cases \
+  test.test_geometric_motion_contract \
+  test.test_surface_motion_contract
+```
+
+Unified independent evaluation (the same generated scenes are used for every
+method, including zero velocity, surface geometry, coarse scorer, and v2
+refinement variants):
+
+```bash
+conda run --no-capture-output -n scanflow python test/evaluate_motion_v2.py \
+  --samples 128 --seed 20261010 --beams 180 --device cuda \
+  --checkpoint artifacts/candidate_scorer/best.pt \
+  --save artifacts/motion_v2/evaluation.json \
+  --save-data artifacts/motion_v2/test_seed_20261010.npz
+```
+
+A2/A4 controls and history/time interventions:
+
+```bash
+conda run --no-capture-output -n scanflow python test/evaluate_motion_v2_controls.py \
+  --device cuda --checkpoint artifacts/candidate_scorer/best.pt \
+  --save artifacts/motion_v2/controls.json
+```
+
+Deterministic J1–J4 hard-case diagnostics:
+
+```bash
+conda run --no-capture-output -n scanflow python test/evaluate_motion_v2_hard_cases.py \
+  --save artifacts/motion_v2/hard_cases.json
+```
+
+The report records dynamic precision/recall/F1, velocity EPE, static false
+dynamic rate, support/uncertainty diagnostics, distance buckets, and mean/P50/P95
+latency. See `docs/v2_refinement_experiment.md` and the Phase A–E documents for
+the current gate decisions. `dynamic_probability` is a ranking-derived proxy
+until a separate presence head is trained and calibrated.

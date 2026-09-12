@@ -346,3 +346,8 @@ conda run -n scanflow python -m unittest test.test_motion_cost_contract
 4. 只有在运动精度不退化、静态误报降低、计算预算可接受时，才接入 NMPC 做闭环比较；
 5. 若成熟对应基线已经达到目标，则把贡献转向 2D LiDAR 特有的稀疏性、不确定性和规划接口，而不是继续增加模型复杂度。
 
+## 12. v2 prototype 执行结果
+
+根据 [ScanFlow v2 Motion Estimator 执行计划](ScanFlow%20v2%20Motion%20Estimator%20执行计划.md)，已完成公共几何层、统一 cost volume、candidate scorer 接口、top-k 连续几何细化、统一独立评测和 J1–J4 hard-case 诊断。详细结果见 [v2 refinement experiment](v2_refinement_experiment.md) 及 Phase A–D 文档。
+
+在 128 个新 test scenes（seed 20261010、CUDA GTX 1650）上，surface baseline 为 F1=0.663、EPE=0.170 m/s、static FP=7.95%；scorer coarse MAP 为 F1=0.762、EPE=0.198 m/s、static FP=4.84%；scorer top-1/top-3 + refinement 分别为 F1=0.681/0.665、EPE=0.173/0.169 m/s、static FP=7.03%/7.95%。所以 Gate 2 的相对条件通过，Gate 3 的绝对目标尚未通过。A2 全部低于 3% false dynamic；J1–J4 诊断级行为通过，但还不能接入 NMPC。

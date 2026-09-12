@@ -1,1 +1,95 @@
-baseline/
+# Baseline repositories and vendored reference projects
+/baseline/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+.hypothesis/
+
+# Virtual environments and local Python tooling
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.pdm.toml
+
+# Packaging and build artifacts
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+*.manifest
+*.spec
+
+# Test, coverage, and profiling output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+nosetests.xml
+*.prof
+
+# Notebooks and generated documentation
+.ipynb_checkpoints/
+docs/_build/
+_build/
+
+# Experiment data, checkpoints, logs, and tracking output
+/data/
+/datasets/
+/checkpoints/
+/outputs/
+/output/
+/results/
+/runs/
+/artifacts/
+/logs/
+/tensorboard/
+/wandb/
+/mlruns/
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*_data.json
+
+# Generated visualizations and media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+
+# Logs and local configuration
+*.log
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db

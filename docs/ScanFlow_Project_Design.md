@@ -1,7 +1,7 @@
 # ScanFlow 项目设计文档
 
 > **暂定项目名：ScanFlow**  
-> **核心目标：从历史 2D LiDAR 中学习 ego-motion-compensated 动态运动场，并将其直接用于 dynamic-aware NMPC，实现无需显式检测/跟踪的动态机器人导航。**
+> **核心目标：从历史 2D LiDAR 中学习 ego-motion-compensated、detection-free 的局部运动场，并将当前 LiDAR 几何占据与学习到的动态状态共同用于 dynamic-aware NMPC。**
 
 ---
 
@@ -12,26 +12,37 @@ ScanFlow 的核心思想是：
 ```text
 Historical 2D LiDAR + Odometry
 ↓
-Ego-Motion Compensation
+SE(2) Ego-Motion Compensation
 ↓
-2D LiDAR Patch Tokenization
+LiDAR Angular Patch Tokenization
 ↓
-Cross-frame Dynamic Modeling
+Validity-aware Local Cross-frame Matching
+↓
+Residual Motion Tokens
+↓
+Per-patch Temporal Modeling
 ↓
 Detection-free Token Motion Field
+[x, y, vx, vy, dynamic_confidence]
++
+Current LiDAR Occupancy / Anchor Validity
 ↓
 Dynamic-aware NMPC
 ↓
 (v_cmd, ω_cmd)
 ```
 
-神经网络只负责回答：
+神经网络主要回答：
 
-> **“周围哪里在动，以及怎么动？”**
+> **“当前可见区域中哪里存在动态运动，以及这些区域怎么动？”**
+
+当前 LiDAR 几何回答：
+
+> **“哪里存在需要避让的实际占据？”**
 
 NMPC 负责回答：
 
-> **“根据这些运动状态，我接下来怎么走才安全？”**
+> **“结合静态占据与动态运动预测，我接下来怎么走才安全？”**
 
 因此本项目不是：
 
@@ -49,6 +60,8 @@ LiDAR → Neural Trajectory Decoder
 
 ```text
 Learning for Dynamic Perception
++
+Geometry for Obstacle Existence
 +
 Model-based Optimization for Planning
 ```
@@ -70,17 +83,20 @@ Historical LiDAR
 
 - expert trajectory label
 - dynamic-aware teacher
-- 大量导航 episode
+- 大量 navigation episode
 - 处理 trajectory 多模态
-- 学习模块承担 perception + prediction + planning 三个任务
+- 学习模块同时承担 perception + prediction + planning
 
-工程复杂度和训练数据成本都比较高。
+工程复杂度和训练数据成本都较高。
 
-最终改成 NeuPAN 风格的：
+最终采用 NeuPAN 风格的职责分离：
 
 ```text
 Learning
 → Dynamic Representation
+
+Current LiDAR Geometry
+→ Obstacle Existence
 
 Optimization
 → Trajectory / Control
@@ -88,13 +104,14 @@ Optimization
 
 主要优势：
 
-1. **训练标签更容易自动生成**
+1. **训练标签容易自动生成**
 2. 不需要 expert planner trajectory
 3. 网络任务更单纯
 4. perception 与 planning 解耦
-5. 可解释性更强
-6. NMPC 可显式处理动力学和安全约束
-7. 后续真实机器人部署更容易调试
+5. 静态障碍不会依赖动态分类器才能被 planner 看见
+6. NMPC 可显式处理动力学、安全距离和控制约束
+7. 可解释性更强
+8. 后续真实机器人部署更容易调试
 
 ---
 
@@ -102,15 +119,13 @@ Optimization
 
 ScanFlow 实际研究的问题是：
 
-> 给定最近一小段历史 2D LiDAR 和机器人 odometry，能否在去除机器人自身运动后，直接学习一个 detection-free 的局部二维运动场，并利用该运动场进行动态避障？
+> 给定最近一小段历史 2D LiDAR 和机器人 odometry，能否在去除机器人自身运动后，直接学习一个 detection-free 的局部二维运动场，并利用该运动场增强基于当前 LiDAR 占据的动态避障？
 
-核心变量：
+历史 LiDAR：
 
 ```math
 L_{t-K+1:t}
 ```
-
-表示历史 LiDAR。
 
 经过 ego-motion compensation 后：
 
@@ -118,7 +133,7 @@ L_{t-K+1:t}
 \tilde L_{t-K+1:t}
 ```
 
-网络最终输出：
+网络输出：
 
 ```math
 \mathcal M_t
@@ -132,19 +147,30 @@ L_{t-K+1:t}
 q_j=(x_j,y_j)
 ```
 
-为第 `j` 个 spatial token 的几何 anchor；
+为第 `j` 个当前 spatial token 的几何 anchor；
 
 ```math
 v_j=(v_{x,j},v_{y,j})
 ```
 
-为对应局部区域估计的运动速度；
+为对应区域估计的障碍物自身运动速度，表达在当前机器人坐标系；
 
 ```math
-c_j
+c_j\in[0,1]
 ```
 
-为动态置信度。
+表示：
+
+> **当前 patch 存在动态运动的概率（dynamic presence probability）。**
+
+注意：
+
+```text
+c_j 不是 obstacle-existence probability
+c_j 也不是 dynamic beam fraction
+```
+
+障碍物是否存在由当前 LiDAR 几何 / anchor validity 决定。
 
 最终 Motion Field：
 
@@ -164,6 +190,15 @@ shape：
 P = 36
 ```
 
+模型同时输出：
+
+```text
+current_valid
+[B, P]
+```
+
+用于表示当前 patch 是否具有有效 LiDAR 几何 anchor。
+
 ---
 
 # 4. 项目创新点定位
@@ -177,7 +212,7 @@ P = 36
 - Dynamic obstacle velocity + MPC
 - Future occupancy prediction
 
-这些方向都已有相关研究。
+这些方向均已有相关研究。
 
 ScanFlow 真正需要坚持的创新点是：
 
@@ -205,7 +240,7 @@ External object motion
 
 ---
 
-## 4.2 Local Cross-frame Attention
+## 4.2 Validity-aware Local Cross-frame Matching
 
 不直接做：
 
@@ -217,18 +252,21 @@ token_t[j] - token_t-1[j]
 
 - 障碍物可能跨 patch
 - occlusion 会改变 beam correspondence
-- ego alignment 后仍然有 reprojection discretization
+- ego alignment 后仍存在 reprojection discretization
 - LiDAR scan 存在噪声
+- 历史 scan warping 后部分 angular bin 可能没有有效点
 
 因此采用：
 
 ```text
 Current Patch j
 ↓
-Attend to historical patches
+Attend only to valid historical patches
 [j-r, ..., j+r]
 ↓
 Matched Historical Feature
++
+Matched Validity
 ```
 
 第一版：
@@ -238,6 +276,8 @@ r = 2
 ```
 
 即每个当前 patch 只关注历史帧附近 5 个 angular patches。
+
+历史无效 patch 会在 attention 中被 mask 掉；若整个局部窗口均不可匹配，则该 residual time step 标记为无效，不参与后续 temporal pooling。
 
 ---
 
@@ -254,7 +294,13 @@ e_t-\bar e_{t-k},
 ]
 ```
 
-再通过 MLP：
+再通过：
+
+```text
+4D → 2D → D
+```
+
+默认：
 
 ```text
 512 → 256 → 128
@@ -293,17 +339,50 @@ Token-level Dynamic Modeling
 Sparse Motion Field
 ```
 
-即每个 angular patch 直接输出：
+每个 angular patch 输出：
 
 ```text
-(vx, vy, confidence)
+(vx, vy, dynamic_confidence)
 ```
 
 不要求显式 object ID。
 
-训练阶段允许使用 object ID 产生 GT；
+训练阶段允许使用 object ID 生成 GT / debug；
 
-**推理阶段完全不需要 object ID、检测或跟踪。**
+**推理阶段不需要 object ID、检测或跟踪。**
+
+---
+
+## 4.5 Geometry / Dynamics Decoupling for Planning
+
+当前实现明确区分：
+
+```text
+Obstacle existence
+← current LiDAR geometry
+
+Obstacle motion
+← learned motion field
+```
+
+因此：
+
+```text
+static wall
+→ current anchor valid
+→ confidence ≈ 0
+→ effective velocity ≈ 0
+→ 仍然必须参与 collision avoidance
+```
+
+而不是：
+
+```text
+confidence ≈ 0
+→ obstacle disappears
+```
+
+这是当前 planner 语义中非常重要的一条原则。
 
 ---
 
@@ -312,68 +391,51 @@ Sparse Motion Field
 ```text
 Historical 2D LiDAR
 [B, K, H]
-
 +
 Historical Odometry
 [B, K, 3]
-
 ↓
-
 Odometry-based Scan Warping
 (range → xy → SE(2) → polar reprojection)
-
 ↓
-
 Aligned Range History
 [B, K, H]
-
 +
 Validity Mask
 [B, K, H]
-
 ↓
-
-LiCS-style Patch Tokenization
-
+LiDAR Patch Tokenization
+(range + validity)
 ↓
-
-Spatial + Temporal Embedding
-
+Spatial Patch Embedding
 ↓
-
-Local Cross-frame Attention
-
+Validity-aware Local Cross-frame Attention
 ↓
-
 Residual Motion Token Encoder
-
 ↓
-
-Temporal Transformer
-
+Temporal Lag Embedding
 ↓
-
-Patch-wise Dynamic Features
-
+Per-patch Temporal Transformer
 ↓
-
+Validity-aware Temporal Pooling
+↓
+Motion Evidence
++
+Current Spatial Token
+↓
+Dynamic Feature Fusion
+↓
 Motion Field Head
-
 ↓
-
 Token Motion Field
 [x, y, vx, vy, confidence]
-
++
+Current Anchor Validity
 ↓
-
 Dynamic-aware NMPC
-
 ↓
-
 Local Trajectory
-
 ↓
-
 (v_cmd, ω_cmd)
 ```
 
@@ -391,6 +453,7 @@ patch_size = 20
 D = 128
 
 Cross-Attention Heads = 4
+Local Patch Radius = 2
 Temporal Transformer Layers = 3
 Temporal Heads = 4
 FFN Dim = 256
@@ -401,6 +464,14 @@ FFN Dim = 256
 ```text
 6 frames ≈ 0.5 s history
 ```
+
+其中 temporal motion sequence 长度为：
+
+```text
+T_motion = K - 1 = 5
+```
+
+因为 Temporal Transformer 处理的是 5 个 historical-vs-current residual motion tokens，而不是把 raw current token 混入同一 temporal sequence。
 
 ---
 
@@ -424,24 +495,10 @@ x_i=r_i\cos\theta_i
 y_i=r_i\sin\theta_i
 ```
 
-因为 SE(2) rigid transform 在 Cartesian 中最自然：
+SE(2) rigid transform 在 Cartesian 中最自然：
 
 ```math
-p'_i
-=
-R(\Delta\theta)p_i
-+
-t
-```
-
-即：
-
-```math
-p'_i
-=
-R(\Delta\theta)p_i
-+
-[\Delta x,\Delta y]^T
+p'_i=R(\Delta\theta)p_i+t
 ```
 
 然后重新投影：
@@ -460,7 +517,7 @@ r'_i=\sqrt{x'^2+y'^2}
 
 ## 7.2 为什么需要重新回到 range
 
-LiCS-style tokenizer 假设：
+LiDAR angular patch tokenizer 假设：
 
 > 连续 beam index 对应连续 angular sector。
 
@@ -504,38 +561,32 @@ Aligned fixed-angle range scan
 validity mask = 0
 ```
 
-而不是直接认为：
-
-```text
-free space
-```
+而不是直接认为 free space。
 
 ---
 
-# 8. LiCS-style 2D LiDAR Tokenization
+# 8. LiDAR Patch Tokenization
 
-LiCS 的核心思想：
+LiCS 提供的核心启发是：
 
 ```text
 720 beams
 ↓
-36 patches
+36 angular patches
 ↓
 20 beams / patch
 ↓
 Linear Embedding
 ↓
-Transformer Token
+Transformer-compatible Token
 ```
 
-ScanFlow 做了一点扩展：
-
-每个 patch 输入：
+ScanFlow 扩展为每个 patch 输入：
 
 ```text
-20 range values
+20 normalized range values
 +
-20 validity values
+20 validity bits
 ```
 
 因此：
@@ -558,6 +609,14 @@ LayerNorm
 ```text
 [B, 6, 36, 128]
 ```
+
+在 cross-frame matching 前只加入：
+
+```text
+Spatial Patch Embedding
+```
+
+不提前加入 temporal embedding，避免 frame identity 干扰 spatial similarity matching。
 
 ---
 
@@ -584,7 +643,7 @@ Query:
 current patch j
 
 Key / Value:
-historical patch
+valid historical patches
 j-2 ... j+2
 ```
 
@@ -593,7 +652,12 @@ j-2 ... j+2
 ```text
 matched_history
 [B, 5, 36, 128]
+
+matched_valid
+[B, 5, 36]
 ```
+
+`matched_valid` 表示对应 history lag 是否在局部 angular window 内存在可用匹配，并且当前 patch 本身有效。
 
 然后构造 residual：
 
@@ -627,73 +691,115 @@ Residual Motion Tokens
 
 # 10. Temporal Transformer
 
-不建议一开始做：
-
-```text
-6 × 36 = 216 tokens
-→ global attention
-```
-
 第一版采用：
 
-> **每个 spatial patch 独立进行 temporal attention**
+> **每个 spatial patch 独立进行 temporal motion attention。**
 
-即：
+输入只包含 residual motion tokens：
 
 ```text
-[B, 6, 36, 128]
+[B, K-1, P, D]
+=
+[B, 5, 36, 128]
+```
+
+先加入 learned Temporal Lag Embedding：
+
+```text
+Residual Motion Tokens
++
+Lag Embedding
+```
+
+再变换：
+
+```text
+[B, 5, 36, 128]
 ↓
-[B, 36, 6, 128]
+[B, 36, 5, 128]
 ↓
-[B×36, 6, 128]
+[B×36, 5, 128]
 ↓
 Temporal Transformer
 ↓
-[B, 6, 36, 128]
+[B, 5, 36, 128]
 ```
 
-这样：
+Temporal Transformer 使用 `matched_valid` 作为 padding mask，避免无效历史匹配参与 temporal attention。
 
-- 更轻量
-- temporal semantics 更明确
-- 不会过早混合空间位置
-- 局部空间 matching 已由 cross-attention 完成
-
----
-
-# 11. Motion Field Head
-
-Temporal pooling：
+随后进行 validity-aware learned pooling：
 
 ```text
-[B, 6, 36, 128]
+[B, 5, 36, 128]
 ↓
 [B, 36, 128]
 ```
 
-然后：
+这样做的原因：
+
+- temporal sequence 中所有 token 都具有相同的 residual-motion 语义
+- current spatial appearance 不再和 residual token 混在同一序列
+- invalid reprojection / unmatched history 不会被当成有效动态证据
+- 空间 matching 已由 local cross-attention 处理
+
+---
+
+# 11. Dynamic Feature Fusion 与 Motion Field Head
+
+Temporal pooling 得到：
 
 ```text
-MLP
+motion_features
+[B, 36, 128]
+```
+
+当前 spatial token：
+
+```text
+current
+[B, 36, 128]
+```
+
+二者在 temporal modeling 后进行 fusion：
+
+```text
+[motion_features, current]
+↓
+Linear(256 → 128)
+GELU
+LayerNorm
+↓
+dynamic_features
+[B, 36, 128]
+```
+
+再进入 Motion Field Head：
+
+```text
 128 → 64 → 64
 ```
 
 输出：
 
 ```text
-velocity:
+velocity
 [B, 36, 2]
 
-confidence:
+confidence
 [B, 36, 1]
 ```
 
-每个 token：
+其中：
 
 ```text
-vx
-vy
-confidence
+confidence = P(dynamic motion exists in this current patch)
+```
+
+对无 current anchor 的 patch：
+
+```text
+velocity = 0
+confidence = 0
 ```
 
 ---
@@ -709,7 +815,7 @@ Anchor 不通过网络预测。
 ↓
 Cartesian points
 ↓
-centroid / median
+centroid
 ↓
 (x, y)
 ```
@@ -719,6 +825,9 @@ centroid / median
 ```text
 anchors
 [B, 36, 2]
+
+current_valid
+[B, 36]
 ```
 
 最终：
@@ -726,51 +835,47 @@ anchors
 ```text
 motion_field
 [B, 36, 5]
+=
+[x, y, vx, vy, confidence]
 ```
 
-即：
+Anchor 的几何有效性与 dynamic confidence 是两个不同概念：
 
 ```text
-[x, y, vx, vy, confidence]
+current_valid → 障碍物几何是否存在
+confidence    → 该几何区域是否具有动态运动
 ```
 
 ---
 
 # 13. 为什么不预测 Future Occupancy
 
-最开始考虑过：
-
-```text
-Dynamic Transformer
-↓
-Future Occupancy
-↓
-MPC
-```
-
-但最终没有作为第一版。
+第一版不预测完整 Future Occupancy。
 
 原因：
 
 1. 网络任务明显更重
 2. 需要预测整个未来空间
 3. 与已有 occupancy forecasting 方法更接近
-4. MPC 本身已经具有未来预测能力
-5. 当前 motion state 更容易监督
+4. NMPC 本身已具有有限时域预测能力
+5. 当前 motion state 更容易监督和解释
 
-所以最终分工：
+所以分工为：
 
 ```text
-Network:
-在哪里 + 怎么动
+Current LiDAR:
+哪里有东西
 
-MPC:
-未来在哪 + 我怎么走
+Network:
+哪些可见区域在动 + 怎么动
+
+NMPC:
+它们未来可能在哪 + 机器人怎么走
 ```
 
 ---
 
-# 14. NMPC
+# 14. NMPC Motion Semantics
 
 网络给出：
 
@@ -778,40 +883,60 @@ MPC:
 (q_j,v_j,c_j)
 ```
 
-NMPC 内部采用第一版 constant velocity prediction：
+规划器定义 effective token velocity：
+
+```math
+v_j^{eff}=c_jv_j
+```
+
+第一版 constant-velocity prediction：
 
 ```math
 \hat q_j(k)
 =
 q_j
 +
-v_j k\Delta t
+v_j^{eff}k\Delta t
 ```
 
-机器人使用 unicycle model：
+即：
 
 ```math
-x_{k+1}
+\hat q_j(k)
 =
-x_k
+q_j
 +
-v_k\cos\theta_k\Delta t
+c_jv_jk\Delta t
+```
+
+这意味着：
+
+```text
+static obstacle:
+current geometry valid
+confidence ≈ 0
+→ future position ≈ current position
+→ 始终参与避障
+
+high-confidence dynamic obstacle:
+confidence ≈ 1
+→ 使用完整预测 velocity
+```
+
+**confidence 只调制运动，不决定障碍物是否存在。**
+
+机器人采用 unicycle model：
+
+```math
+x_{k+1}=x_k+v_k\cos\theta_k\Delta t
 ```
 
 ```math
-y_{k+1}
-=
-y_k
-+
-v_k\sin\theta_k\Delta t
+y_{k+1}=y_k+v_k\sin\theta_k\Delta t
 ```
 
 ```math
-\theta_{k+1}
-=
-\theta_k
-+
-\omega_k\Delta t
+\theta_{k+1}=\theta_k+\omega_k\Delta t
 ```
 
 控制：
@@ -822,9 +947,9 @@ u_k=[v_k,\omega_k]
 
 ---
 
-# 15. NMPC Cost
+# 15. NMPC Cost 与 Safety Constraint
 
-第一版：
+第一版 cost：
 
 ```math
 J=
@@ -836,22 +961,48 @@ J_{control}
 +
 J_{smooth}
 +
-J_{dynamic-collision}
+J_{soft-collision}
++
+J_{safety-slack}
 ```
 
-其中动态碰撞项：
+所有有效 obstacle token 都参与 collision term：
 
 ```math
-J_{collision}
+J_{soft-collision}
 =
 \sum_{k,j}
-c_j
-\phi(
-\|p_k-\hat q_j(k)\|
-)
+\phi(\|p_k-\hat q_j(k)\|)
 ```
 
-`confidence` 直接作为风险权重。
+注意这里**不再用 `c_j` 作为 obstacle validity / collision weight**。
+
+同时加入软化安全距离约束：
+
+```math
+\|p_k-\hat q_j(k)\|+s_{j,k}
+\ge r_{safe}
+```
+
+```math
+s_{j,k}\ge0
+```
+
+并对 slack 加较强惩罚：
+
+```math
+J_{safety-slack}
+=
+\lambda_s\sum_{j,k}s_{j,k}
+```
+
+其中：
+
+```math
+r_safe
+=
+r_robot+r_obstacle+safety_margin
+```
 
 控制约束：
 
@@ -863,8 +1014,8 @@ v_min ≤ v ≤ v_max
 同时限制：
 
 ```text
-Δv
-Δω
+|Δv| / Δt ≤ a_v_max
+|Δω| / Δt ≤ a_ω_max
 ```
 
 ---
@@ -882,7 +1033,48 @@ CasADi + IPOPT
 ```text
 Horizon = 15
 dt = 0.15 s
+max_obstacles = 24
 ```
+
+Obstacle selection 原则：
+
+```text
+先保留当前几何有效、有限值、范围内 token
+↓
+若超过 max_obstacles
+↓
+优先近距离 occupancy
++
+较弱 dynamic-confidence tie-break
+```
+
+不会因为：
+
+```text
+confidence ≈ 0
+```
+
+而删除静态障碍。
+
+Warm start：
+
+```text
+shift previous U
+↓
+在当前 robot-centric planning frame 中重新 rollout X
+```
+
+不直接复用上一周期的 state trajectory 坐标。
+
+求解失败时：
+
+```text
+IPOPT failure / non-finite control
+↓
+(v_cmd, ω_cmd) = (0, 0)
+```
+
+不会执行未经验证的 `Opti.debug` 控制量。
 
 未来如果需要更高频实机：
 
@@ -917,13 +1109,13 @@ beam_valid
 [720]
 
 beam_object_id
-[720]
+[720]   # generator/debug 可选
 ```
 
 `beam_object_id`：
 
 ```text
-仅用于生成 GT / debug
+仅用于生成 GT / debug / 后续 multi-object 分析
 ```
 
 推理时不需要。
@@ -948,8 +1140,6 @@ dynamic object
 
 ## 18.2 beam_velocity
 
-非常重要：
-
 GT 不是：
 
 ```math
@@ -961,8 +1151,7 @@ v_{obs}-v_{robot}
 ```math
 v^{GT}_{beam}
 =
-R(-\theta_t)
-v^{world}_{object}
+R(-\theta_t)v^{world}_{object}
 ```
 
 即：
@@ -971,13 +1160,7 @@ v^{world}_{object}
 
 因为 ego-motion 已由几何对齐模块消除。
 
-所以：
-
-```text
-机器人快速经过一面静态墙
-```
-
-墙仍然应该：
+所以机器人快速经过一面静态墙时：
 
 ```math
 v_{GT}=0
@@ -987,7 +1170,7 @@ v_{GT}=0
 
 # 19. 为什么训练数据可以完全自动生成
 
-借鉴 NeuPAN 的思路：
+借鉴 NeuPAN 的任务分解思路：
 
 > 不一定要生成大量完整 navigation episode，而是针对学习模块真正需要的数学任务，直接程序化构造训练样本。
 
@@ -1064,7 +1247,7 @@ Robot
 → dynamic obstacle
 ```
 
-beam 的 GT 是：
+beam GT 是：
 
 ```text
 static
@@ -1080,7 +1263,7 @@ static
 
 动态 beam 在真实/随机场景中天然偏少。
 
-因此 generator 设置：
+因此 generator 可设置：
 
 ```text
 min_dynamic_beams
@@ -1092,11 +1275,7 @@ min_dynamic_beams
 regenerate scene
 ```
 
-避免训练集几乎全是：
-
-```text
-static
-```
+避免训练集几乎全是 static。
 
 否则网络容易坍缩：
 
@@ -1104,6 +1283,8 @@ static
 confidence = 0
 velocity = 0
 ```
+
+训练损失仍使用 focal confidence loss 缓解 patch-level dynamic presence 的类别不平衡。
 
 ---
 
@@ -1119,34 +1300,77 @@ velocity = 0
 36 × 20
 ```
 
-每个 patch 的 GT confidence：
+## 23.1 Dynamic Presence Confidence
+
+当前 confidence GT 定义为：
 
 ```math
 c_j^*
 =
-\frac{
-N_{dynamic}
-}{
-N_{valid}
-}
+\mathbb{1}[N_{dynamic,j}>0]
 ```
 
-是 soft label，而不是简单 0/1。
+也就是：
+
+> **只要当前有效 patch 内至少有一个 dynamic beam，该 patch 的 dynamic-presence target 就为 1。**
+
+这样可以避免小目标只占少量 beam 时，完美模型仍输出低 confidence 的语义问题。
+
+例如：
+
+```text
+20 valid beams
+4 dynamic beams
+```
+
+当前定义：
+
+```text
+confidence_target = 1
+```
+
+而不是：
+
+```text
+confidence_target = 4/20 = 0.2
+```
 
 ---
 
-## 23.1 Patch velocity
+## 23.2 Dynamic Fraction
+
+仍保留：
+
+```math
+f_j
+=
+\frac{N_{dynamic,j}}{N_{valid,j}}
+```
+
+但它只是：
+
+```text
+dynamic_fraction
+```
+
+用途：
+
+- dataset diagnostics
+- 可选 velocity reliability gating
+- 分析小目标 / patch 混合程度
+
+它**不是 motion-field confidence 的监督目标**。
+
+---
+
+## 23.3 Patch Velocity
 
 只聚合 dynamic beam：
 
 ```math
 v_j^*
 =
-\frac{
-\sum_i d_i v_i
-}{
-\sum_i d_i
-}
+\frac{\sum_i d_i v_i}{\sum_i d_i}
 ```
 
 其中：
@@ -1157,21 +1381,23 @@ d_i
 
 是 dynamic indicator / weight。
 
+如果同一个 patch 内同时包含多个不同运动物体，当前第一版仍会对其 dynamic beam velocity 做平均。这是明确已知的 representation limitation，后续可利用 `beam_object_id` 做 dominant / nearest / risk-aware motion aggregation。
+
 ---
 
 # 24. Training Loss
 
-最终：
+当前：
 
 ```math
 L=
-\lambda_c L_{conf}
+\lambda_cL_{conf}
 +
-\lambda_v L_{vel}
+\lambda_vL_{vel}
 +
-\lambda_s L_{static}
+\lambda_sL_{static}
 +
-\lambda_{sm} L_{smooth}
+\lambda_{sm}L_{smooth}
 ```
 
 ---
@@ -1184,9 +1410,15 @@ L=
 Focal BCE
 ```
 
+监督目标：
+
+```text
+binary dynamic presence
+```
+
 目的：
 
-> 抵抗大量静态 patch 带来的类别不平衡。
+> 抵抗大量 static patch 带来的类别不平衡，同时让 confidence 与 planner 中“动态运动可信度”的语义一致。
 
 ---
 
@@ -1195,44 +1427,48 @@ Focal BCE
 采用：
 
 ```text
-confidence-weighted Huber Loss
+weighted Huber Loss
 ```
 
-主要只在真实动态区域监督 velocity。
-
-避免大量静态 patch 把网络推成：
+默认：
 
 ```text
-v = 0 everywhere
+velocity_weight = dynamic_presence
 ```
+
+即主要在真实动态 patch 上监督 velocity。
+
+可选设置：
+
+```text
+min_dynamic_fraction_for_velocity > 0
+```
+
+用于只对 dynamic fraction 足够高的 patch 做 velocity regression，从而过滤非常混杂、速度标签可靠性较弱的 patch。
 
 ---
 
 ## 24.3 Static Velocity Regularization
 
-对 GT 静态 patch：
+对 GT static patch：
 
 ```math
 \|\hat v_j\|
 ```
 
-施加弱约束。
-
-防止网络在静态墙上随意预测运动。
+施加弱约束，防止静态墙上出现任意预测运动。
 
 ---
 
 ## 24.4 Spatial Smoothness
 
-对于相邻的高动态 confidence patches：
+对于相邻且 GT dynamic 的 patches：
 
 ```text
 weak velocity smoothness
 ```
 
-但权重不能过强。
-
-因为相邻 patch 可能属于两个不同动态障碍。
+但权重不能过强，因为相邻 patch 可能属于两个不同动态障碍。
 
 ---
 
@@ -1247,22 +1483,9 @@ visualize_sample.py
 三联图：
 
 ```text
-左：
-Raw LiDAR History
-
-中：
-Ego-aligned History
-
-右：
-Current Scan + GT Motion
-```
-
-右图：
-
-```text
-静态点 = 空心圆
-动态点 = 实心圆
-GT velocity = 箭头
+左：Raw LiDAR History
+中：Ego-aligned History
+右：Current Scan + GT Motion
 ```
 
 肉眼必须确认：
@@ -1272,12 +1495,9 @@ GT velocity = 箭头
 3. dynamic obstacles 仍留下 temporal displacement
 4. velocity arrow 方向合理
 5. occluded dynamic object 不会被错误标注
+6. 小目标即使只占少量 beams，也能形成正确 patch-level dynamic presence
 
-如果这一关不过：
-
-```text
-不要开始正式训练
-```
+如果这一关不过，不要开始正式训练。
 
 ---
 
@@ -1289,22 +1509,32 @@ ScanFlow/
 ├── model.py
 │   ├── ScanWarpingSE2
 │   ├── LiDARPatchTokenizer
-│   ├── SpatioTemporalEmbedding
+│   ├── SpatialPatchEmbedding
 │   ├── LocalCrossFrameAttention
 │   ├── ResidualMotionEncoder
+│   ├── TemporalLagEmbedding
 │   ├── DynamicTemporalTransformer
 │   ├── TemporalTokenPooling
+│   ├── DynamicFeatureFusion
 │   ├── MotionFieldHead
+│   ├── PatchAnchorExtractor
 │   └── DynamicLiDARNetwork
 │
 ├── planner.py
 │   └── DynamicNMPC
+│       ├── current-geometry obstacle selection
+│       ├── confidence-gated motion prediction
+│       ├── soft collision cost
+│       ├── safety slack constraints
+│       ├── robot-centric warm start
+│       └── safe-stop fallback
 │
 ├── train.py
 │   ├── Dataset
-│   ├── Beam → Patch Label
+│   ├── Beam → Patch Targets
+│   ├── Dynamic Presence Confidence
 │   ├── Motion Field Loss
-│   ├── Training Loop
+│   ├── Epoch-level Metrics
 │   └── Checkpoint
 │
 ├── generate_dataset.py
@@ -1312,7 +1542,7 @@ ScanFlow/
 │   ├── Dynamic Agents
 │   ├── Robot Ego-motion
 │   ├── Ray Casting
-│   └── Automatic GT Labels
+│   └── Automatic Motion GT
 │
 └── visualize_sample.py
     └── Raw / Aligned / GT Visualization
@@ -1330,16 +1560,10 @@ ScanFlow/
 2D LiDAR range scan
 → angular patches
 → embedding
-→ Transformer
+→ Transformer-compatible token
 ```
 
-ScanFlow 使用它作为：
-
-```text
-Spatial Tokenizer Reference
-```
-
-不使用其 direct control head。
+ScanFlow 使用它作为 spatial tokenizer reference，不使用其 direct control head。
 
 ---
 
@@ -1353,13 +1577,13 @@ Temporal 2D LiDAR
 Spatial Similarity / Attention
 ```
 
-尤其值得参考：
+重点借鉴：
 
 ```text
-cross-frame local matching
+local cross-frame matching
 ```
 
-但 ScanFlow 不做 person detector。
+ScanFlow 进一步加入 ego alignment、reprojection validity mask 和 residual motion representation。
 
 ---
 
@@ -1381,11 +1605,7 @@ Dynamic environment prediction
 - ego-motion 处理
 - training pipeline
 
-避免直接变成：
-
-```text
-future occupancy prediction
-```
+避免直接变成 future occupancy prediction。
 
 ---
 
@@ -1395,29 +1615,21 @@ future occupancy prediction
 
 ```text
 Learning
-↓
-Environment Representation
+→ Environment / Dynamic Representation
 
 Optimization
-↓
-Motion Planning
+→ Motion Planning
 ```
 
-ScanFlow 对应：
+同时保留一个重要原则：
 
-```text
-Motion Field Learning
-+
-NMPC
-```
+> obstacle geometry 本身应直接进入 planning，而不能因为 learned dynamic confidence 较低就消失。
 
 ---
 
 ## 27.5 IR-SIM
 
-后续非常适合替代当前简化 procedural simulator。
-
-可用于：
+后续适合替代当前简化 procedural simulator，用于：
 
 - 2D LiDAR
 - dynamic obstacles
@@ -1430,25 +1642,17 @@ NMPC
 
 ## 27.6 Arena-Rosnav
 
-论文后期使用：
-
-```text
-复杂 dynamic navigation benchmark
-```
-
-而不是第一阶段开发工具。
+论文后期用于复杂 dynamic navigation benchmark，而不是第一阶段开发工具。
 
 ---
 
 ## 27.7 TEB
 
-可作为重要 baseline：
+重要 baseline：
 
 ```text
 TEB static
-
 TEB + tracked dynamic obstacles
-
 ScanFlow Motion Field + NMPC
 ```
 
@@ -1486,21 +1690,17 @@ acados
 
 更安全的表达：
 
-> **We propose an ego-motion-compensated, detection-free token motion representation that estimates local scene dynamics directly from historical 2D LiDAR scans and integrates the learned motion field with model predictive control for dynamic robot navigation.**
+> **We propose an ego-motion-compensated, detection-free token motion representation that estimates local scene dynamics directly from historical 2D LiDAR scans and integrates the learned motion field with geometry-preserving nonlinear model predictive control for dynamic robot navigation.**
 
 核心关键词：
 
 ```text
 Historical 2D LiDAR
-
 Ego-Motion Compensation
-
-Cross-frame Dynamic Tokens
-
+Validity-aware Cross-frame Matching
 Residual Motion Representation
-
 Detection-free Motion Field
-
+Geometry / Dynamics Decoupling
 Dynamic-aware NMPC
 ```
 
@@ -1508,7 +1708,7 @@ Dynamic-aware NMPC
 
 # 29. 核心 Ablation
 
-论文必须至少做：
+论文至少做：
 
 ## 29.1 Ego Alignment
 
@@ -1518,19 +1718,13 @@ vs
 Ego-aligned History
 ```
 
-证明 robot ego-motion compensation 有效。
-
----
-
 ## 29.2 Residual Motion Tokens
 
 ```text
-Vanilla Temporal Transformer
+Vanilla Temporal Modeling
 vs
 Residual Motion Token
 ```
-
----
 
 ## 29.3 Local Cross Attention
 
@@ -1540,24 +1734,29 @@ vs
 Local Cross Attention
 ```
 
----
-
-## 29.4 Temporal History Length
+## 29.4 Validity-aware Matching
 
 ```text
-K = 1
-K = 3
-K = 6
-K = 10
+No validity mask
+vs
+Validity-aware local matching
 ```
 
----
+## 29.5 Temporal History Length
 
-## 29.5 Robot Ego-speed Stress Test
+```text
+K = 2 / 3 / 6 / 10
+```
 
-保持 dynamic obstacle motion 不变。
+注意当前 motion model 至少需要：
 
-改变 robot：
+```text
+K >= 2
+```
+
+## 29.6 Robot Ego-speed Stress Test
+
+保持 dynamic obstacle motion 不变，改变 robot：
 
 ```text
 slow
@@ -1569,18 +1768,28 @@ fast
 
 > motion estimation 对 robot ego-speed 更不敏感。
 
+## 29.7 Planner Semantics
+
+建议加入：
+
+```text
+Dynamic-confidence-as-obstacle-filter
+vs
+Geometry-preserving planner
+```
+
+证明静态障碍不会因 dynamic confidence 低而从规划器中消失。
+
 ---
 
 # 30. Motion Field Evaluation Metrics
 
 不能只评 navigation success。
 
-需要单独证明 representation 本身有效。
-
 建议：
 
 ```text
-Dynamic Classification
+Dynamic Presence Classification
 - Precision
 - Recall
 - F1
@@ -1593,9 +1802,17 @@ Velocity
 Static False Motion
 - predicted speed on static patches
 
+Confidence Calibration
+- optional reliability / calibration curve
+
+Patch Mixing
+- error vs dynamic_fraction
+
 Ego-motion Robustness
 - velocity error vs robot speed
 ```
+
+训练/验证统计应优先在整个 epoch 累计 TP / FP / FN 后计算 F1，而不是简单平均 batch F1。
 
 ---
 
@@ -1605,22 +1822,17 @@ Ego-motion Robustness
 
 ```text
 Success Rate
-
 Collision Rate
-
 Dynamic Collision Rate
-
+Static Collision Rate
 Time to Goal
-
 Path Length
-
 Minimum Clearance
-
 Average Speed
-
 Control Smoothness
-
 Computation Time
+Solver Failure Rate
+Safety Slack Usage
 ```
 
 ---
@@ -1631,15 +1843,10 @@ Computation Time
 
 ```text
 No history
-
 Raw history Transformer
-
 Ego-aligned history Transformer
-
 Same-index residual
-
 Cross-attention residual
-
 ScanFlow full
 ```
 
@@ -1649,13 +1856,9 @@ ScanFlow full
 
 ```text
 Static NMPC
-
 TEB
-
 Dynamic TEB / tracked obstacle baseline
-
 GT Motion Field + NMPC
-
 Predicted ScanFlow Motion Field + NMPC
 ```
 
@@ -1665,15 +1868,22 @@ Predicted ScanFlow Motion Field + NMPC
 GT Motion Field + NMPC
 ```
 
-非常重要。
-
-它可以区分：
+非常重要，它可以区分：
 
 ```text
 Planner 上限
 vs
 Perception 误差
 ```
+
+另外建议保留：
+
+```text
+GT geometry + GT motion
+GT geometry + predicted motion
+```
+
+进一步隔离 motion estimation 对 planning 的影响。
 
 ---
 
@@ -1755,6 +1965,7 @@ cmd_vel
 - scan deskew
 - sensor latency
 - inference latency
+- solver timeout / safe fallback
 
 ---
 
@@ -1767,9 +1978,7 @@ cmd_vel
 不要：
 
 ```text
-scan_t-k
-+
-latest odom
+scan_t-k + latest odom
 ```
 
 应该：
@@ -1786,13 +1995,7 @@ interpolate robot pose
 
 第一版低速仿真可以不做。
 
-高速实机时：
-
-```text
-LaserScan 本身也有采样时间跨度
-```
-
-可能需要根据：
+高速实机时 LaserScan 本身有采样时间跨度，可能需要根据：
 
 ```text
 time_increment
@@ -1804,15 +2007,13 @@ time_increment
 
 ## 34.3 Odometry Noise
 
-第一阶段 GT odometry。
+第一阶段使用 GT odometry。
 
 之后必须测试：
 
 ```text
 Gaussian pose noise
-
 yaw drift
-
 timestamp error
 ```
 
@@ -1825,7 +2026,7 @@ timestamp error
 当前 NMPC：
 
 ```math
-p(t+\tau)=p(t)+v\tau
+q(t+\tau)=q(t)+c\,v\tau
 ```
 
 只是第一版。
@@ -1834,13 +2035,46 @@ p(t+\tau)=p(t)+v\tau
 
 ```text
 Acceleration
-
 Motion uncertainty
-
 Multi-modal prediction
 ```
 
 但不要第一版全部做。
+
+---
+
+## 34.5 Planner Frame Consistency
+
+当前推荐 robot-centric planning：
+
+```text
+robot_state = [0, 0, 0]
+anchors / velocity / goal
+均表达在同一当前 planning frame
+```
+
+每个周期 frame 都会变化，所以 warm start 只 shift 控制序列，并从当前 state 重新 rollout trajectory。
+
+---
+
+## 34.6 Solver Failure
+
+求解器失败不是“仍然输出某个 debug iterate”的理由。
+
+当前第一版策略：
+
+```text
+solver failure
+→ safe stop
+```
+
+后续可升级为：
+
+```text
+validated braking controller
+or
+certified previous-safe command
+```
 
 ---
 
@@ -1849,45 +2083,30 @@ Multi-modal prediction
 ```text
 ① visualize_sample.py
 确认 geometry / GT 完全正确
-
 ↓
-
 ② 小数据过拟合
 100~1000 samples
 确认网络能学会
-
 ↓
-
 ③ Static-vs-Dynamic sanity test
-固定简单场景
-
 ↓
-
-④ 10k~100k synthetic training
-
+④ Dynamic Presence sanity test
+特别检查小目标 / 少 beam 目标
 ↓
-
-⑤ Motion Field quantitative evaluation
-
+⑤ 10k~100k synthetic training
 ↓
-
-⑥ Plug into NMPC
-
+⑥ Motion Field quantitative evaluation
 ↓
-
-⑦ Closed-loop navigation simulation
-
+⑦ GT Motion Field + NMPC
+先验证 planner 上限和静态障碍安全性
 ↓
-
-⑧ IR-SIM
-
+⑧ Predicted Motion Field + NMPC
 ↓
-
-⑨ Strong baselines + ablation
-
+⑨ Closed-loop navigation simulation
 ↓
-
-⑩ ROS / real robot
+⑩ IR-SIM + strong baselines + ablation
+↓
+⑪ ROS / real robot
 ```
 
 ---
@@ -1902,10 +2121,11 @@ Multi-modal prediction
 Ego-aligned static background visually stable
 ```
 
-### Dynamic Classification
+### Dynamic Presence
 
 ```text
 动态 patch F1 明显高于 naive baseline
+小型动态目标不会因占 beam 少而被系统性压低 confidence
 ```
 
 ### Velocity
@@ -1920,12 +2140,18 @@ dynamic velocity EPE 明显低于 zero prediction
 static predicted speed 接近 0
 ```
 
-### NMPC
+### Planner Static Safety
+
+```text
+confidence ≈ 0 的静态障碍仍然能够被避让
+```
+
+### NMPC Dynamic Benefit
 
 使用 GT motion field 时：
 
 ```text
-明显优于 static NMPC
+明显优于 static-motion assumption baseline
 ```
 
 使用 predicted field 时：
@@ -1934,9 +2160,9 @@ static predicted speed 接近 0
 接近 GT field planner 性能
 ```
 
-如果这五步成立：
+如果这些条件成立：
 
-> 这个研究方向就真正站住了。
+> 这个研究方向才真正站住。
 
 ---
 
@@ -1944,11 +2170,11 @@ static predicted speed 接近 0
 
 ScanFlow 可以最终定义为：
 
-> **A detection-free dynamic navigation framework that learns an ego-motion-compensated local motion field from historical 2D LiDAR scans and integrates the learned motion representation with nonlinear model predictive control.**
+> **A detection-free dynamic navigation framework that learns an ego-motion-compensated local motion field from historical 2D LiDAR scans and integrates the learned dynamics with geometry-preserving nonlinear model predictive control.**
 
 中文：
 
-> **ScanFlow 是一种面向动态机器人导航的检测无关框架，通过历史 2D LiDAR 和里程计学习经 ego-motion 补偿的局部运动场，并将该动态表示直接嵌入非线性模型预测控制进行实时导航。**
+> **ScanFlow 是一种面向动态机器人导航的检测无关框架，通过历史 2D LiDAR 与里程计学习经 ego-motion 补偿的局部运动场，同时保留当前 LiDAR 几何占据，并将二者共同嵌入非线性模型预测控制进行动态导航。**
 
 ---
 
@@ -1959,18 +2185,32 @@ Historical 2D LiDAR + Odometry
 ↓
 SE(2) Ego-Motion Compensation
 ↓
-Aligned Range History
+Aligned Range + Validity History
 ↓
-LiCS-style Patch Tokens
+LiDAR Angular Patch Tokens
 ↓
-Local Cross-frame Attention
+Spatial Patch Embedding
+↓
+Validity-aware Local Cross-frame Attention
 ↓
 Residual Motion Tokens
 ↓
-Temporal Transformer
+Temporal Lag Embedding
+↓
+Per-patch Temporal Transformer
+↓
+Validity-aware Temporal Pooling
+↓
+Fuse with Current Spatial Token
 ↓
 Detection-free Token Motion Field
-[x, y, vx, vy, confidence]
+[x, y, vx, vy, dynamic_confidence]
++
+Current LiDAR Geometry / Anchor Validity
+↓
+confidence-gated motion prediction
++
+geometry-preserving collision avoidance
 ↓
 Dynamic-aware NMPC
 ↓
@@ -1981,32 +2221,46 @@ Dynamic-aware NMPC
 
 # 39. 当前项目状态
 
-目前已经形成第一版代码骨架：
+目前第一版代码已经形成语义闭环：
 
 ```text
 model.py
-✓ 网络主体
 ✓ SE(2) scan warping
+✓ range reprojection + validity
 ✓ patch tokenizer
-✓ cross-frame attention
+✓ spatial-only embedding before matching
+✓ validity-aware local cross-frame attention
+✓ matched validity propagation
 ✓ residual motion encoder
-✓ temporal transformer
+✓ temporal lag embedding
+✓ residual-only temporal transformer
+✓ validity-aware temporal pooling
+✓ current spatial feature fusion
 ✓ motion head
+✓ geometric anchor / current_valid
 
 planner.py
-✓ CasADi NMPC
-✓ dynamic token prediction
-✓ collision penalty
-✓ control constraints
-✓ warm start
+✓ CasADi + IPOPT NMPC
+✓ current geometry determines obstacle existence
+✓ dynamic confidence gates predicted motion only
+✓ static obstacles preserved
+✓ soft collision penalty
+✓ safety slack constraints
+✓ control / rate constraints
+✓ robot-centric warm start re-rollout
+✓ solver failure safe-stop fallback
 
 train.py
 ✓ beam → patch GT
+✓ binary dynamic-presence confidence target
+✓ dynamic_fraction retained as auxiliary diagnostic
 ✓ Focal confidence loss
 ✓ Huber velocity loss
 ✓ static regularization
-✓ smoothness
-✓ training loop
+✓ weak spatial smoothness
+✓ epoch-level classification metrics
+✓ static-speed diagnostic
+✓ training loop / checkpoint
 
 generate_dataset.py
 ✓ procedural scene
@@ -2022,14 +2276,16 @@ visualize_sample.py
 ✓ velocity arrows
 ```
 
-下一阶段的重点已经不是继续堆模块，而是：
+下一阶段重点不是继续堆模型模块，而是：
 
 ```text
-验证 GT
+验证 geometry / GT
 ↓
-验证 motion field 是否真正可学
+验证 dynamic presence 与 velocity 是否真正可学
 ↓
-验证 predicted field 是否能改善 NMPC 动态导航
+验证 GT motion field 下 planner 的静态安全和动态收益
+↓
+验证 predicted field 是否能保持这些收益
 ```
 
-这三个实验结果会决定 ScanFlow 是否值得继续扩展成完整论文。
+这几组实验结果会决定 ScanFlow 是否值得继续扩展成完整论文。

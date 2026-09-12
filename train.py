@@ -139,12 +139,16 @@ def build_patch_targets(
 
 @dataclass
 class LossConfig:
-    lambda_conf: float = 1.0
+    # Dynamic patches are sparse.  Confidence must remain a first-class
+    # objective instead of being numerically dwarfed by velocity regression.
+    lambda_conf: float = 4.0
     lambda_vel: float = 4.0
-    lambda_static: float = 0.10
+    # The velocity head is otherwise unconstrained on the much larger set of
+    # static patches and can learn arbitrary non-zero outputs there.
+    lambda_static: float = 1.0
     lambda_smooth: float = 0.05
     focal_gamma: float = 2.0
-    focal_alpha: float = 0.25
+    focal_alpha: float = 0.75
     huber_beta: float = 0.20
 
 

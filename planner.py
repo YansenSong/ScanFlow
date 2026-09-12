@@ -115,9 +115,14 @@ class DynamicNMPC:
             dxg, dyg = xk - goal[0], yk - goal[1]
             dist_goal_sq = dxg * dxg + dyg * dyg
             total_cost += c.w_goal_xy * dist_goal_sq
-            desired_heading = ca.atan2(goal[1] - yk, goal[0] - xk)
-            heading_err = ca.atan2(ca.sin(thk - desired_heading), ca.cos(thk - desired_heading))
-            total_cost += c.w_heading * heading_err * heading_err
+            # Avoid atan2(goal-y, goal-x): its derivative is undefined when a
+            # predicted state lands exactly on the goal, which commonly
+            # happens once the goal enters the finite horizon.  The normalized
+            # 2-D cross product is a smooth heading-error surrogate and
+            # naturally vanishes at the goal.
+            to_goal_x, to_goal_y = goal[0] - xk, goal[1] - yk
+            heading_cross = ca.cos(thk) * to_goal_y - ca.sin(thk) * to_goal_x
+            total_cost += c.w_heading * heading_cross * heading_cross / (dist_goal_sq + 1e-4)
             goal_dist = ca.sqrt(dist_goal_sq + 1e-6)
             total_cost -= c.w_progress * goal_dist * vk
             total_cost += c.w_control_v * vk * vk + c.w_control_w * wk * wk
@@ -134,7 +139,13 @@ class DynamicNMPC:
 
                 # For padded entries valid=0, this becomes trivially satisfied.
                 opti.subject_to(dist + S[j, k] + (1.0 - valid) * self.safe_radius >= self.safe_radius)
-                total_cost += c.w_safety_slack * valid * S[j, k]
+                # Penalize every slack quadratically, including padded
+                # entries.  Gating this term by ``valid`` leaves all padded
+                # slacks as cost-free degrees of freedom and produces a
+                # rank-deficient NLP when obstacles leave sensor range.
+                total_cost += c.w_safety_slack * (
+                    valid * S[j, k] + 0.1 * S[j, k] * S[j, k]
+                )
 
                 penetration = self.safe_radius - dist
                 beta = c.collision_softness
@@ -249,6 +260,10 @@ class DynamicNMPC:
         self.opti.set_initial(self.X, X0)
         self.opti.set_initial(self.U, U0)
         self.opti.set_initial(self.S, 0.0)
+        # Do not carry IPOPT's constraint multipliers across robot-centric
+        # replans: every call changes the goal/obstacle parameters and the old
+        # dual point can be badly inconsistent with the new NLP instance.
+        self.opti.set_initial(self.opti.lam_g, 0.0)
 
         success, status = True, "Solve_Succeeded"
         objective = float("nan")

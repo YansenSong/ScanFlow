@@ -84,3 +84,39 @@ A visible circle moves at a fixed world velocity while robot speed and turn rate
 5. `test_a4_moving_robot_moving_obstacle.py`
 
 Do not tune thresholds to make a weak model pass. The threshold flags exist so experiments can deliberately define stricter or looser research gates.
+
+## Geometry-only motion baseline
+
+```bash
+conda run -n scanflow python -m unittest test.test_geometric_motion_contract
+conda run --no-capture-output -n scanflow python test/evaluate_geometric_motion.py
+```
+
+Requires SciPy. Generates independent synthetic scenes without training; reports
+beam-level dynamic velocity, static false positives, controlled A2/A4 cases, and
+fixed-current-frame temporal interventions. This evaluation reports failures as
+metrics; exit 0 only means execution completed. See
+`docs/geometric_baseline_2026-09-12.md` for results and limitations.
+
+For the local point-to-surface velocity search and paired comparison:
+
+```bash
+conda run -n scanflow python -m unittest test.test_surface_motion_contract
+conda run --no-capture-output -n scanflow python test/evaluate_geometric_motion.py --method surface --seed 20260921 --save /tmp/scanflow_surface_holdout.json
+```
+
+Run `--method centroid` with the same seed and beam count for identical inputs.
+See `docs/surface_matching_2026-09-12.md` for accuracy, CPU timing and remaining limitations.
+
+## Learned candidate scorer (experimental, CUDA)
+
+```bash
+conda run --no-capture-output -n scanflow python test/experiment_candidate_scorer.py --prepare
+conda run --no-capture-output -n scanflow python test/experiment_candidate_scorer.py --overfit --epochs 2000
+conda run --no-capture-output -n scanflow python test/experiment_candidate_scorer.py --epochs 150
+```
+
+Caches independent train/validation/test scenes in `artifacts/candidate_scorer/`.
+`--prepare` regenerates those files. GPU training selects by validation loss only.
+The first model improves classification but worsens velocity accuracy; see
+`docs/candidate_scorer_2026-09-12.md`. It is not connected to the production planner.
